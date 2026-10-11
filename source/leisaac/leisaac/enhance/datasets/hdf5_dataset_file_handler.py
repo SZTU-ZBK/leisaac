@@ -1,5 +1,6 @@
 import copy
 import enum
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
@@ -38,6 +39,8 @@ class StreamingHDF5DatasetFileHandler(HDF5DatasetFileHandler):
             self._hdf5_file_stream = h5py.File(file_path, "a")
             self._hdf5_data_group = self._hdf5_file_stream["data"]
             self._demo_count = len(self._hdf5_data_group)
+            if "env_args" in self._hdf5_data_group.attrs:
+                self._env_args = json.loads(self._hdf5_data_group.attrs["env_args"])
         else:
             self._hdf5_file_stream = h5py.File(file_path, "w")
             # set up a data group in the file
@@ -119,7 +122,7 @@ class StreamingHDF5DatasetFileHandler(HDF5DatasetFileHandler):
             if "num_samples" not in h5_episode_group.attrs:
                 h5_episode_group.attrs["num_samples"] = 0
             h5_episode_group.attrs["num_samples"] += len(episode.data["actions"])
-        else:
+        elif "num_samples" not in h5_episode_group.attrs:
             h5_episode_group.attrs["num_samples"] = 0
 
         if episode.seed is not None:

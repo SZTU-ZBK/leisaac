@@ -41,6 +41,12 @@ python scripts/environments/teleoperation/teleop_se3_agent.py \
 
 - `--record`: Enable data recording; saves teleoperation data to an HDF5 file.
 
+- `--sim_hz`: Physics simulation frequency in Hz (default: `60`).
+
+- `--action_hz`: Teleoperation action output frequency in Hz (default: `60`).
+
+- `--recording_hz`: HDF5/LeRobot recording frequency and LeRobot FPS (default: `30`).
+
 - `--dataset_file`: Path to save the recorded dataset, e.g., `./datasets/record_data.hdf5`.
 
 - `--resume`: Enable resume data recording from the existing dataset file.
@@ -52,8 +58,6 @@ python scripts/environments/teleoperation/teleop_se3_agent.py \
 - `--use_lerobot_recorder`: Whether to use lerobot recorder.
 
 - `--lerobot_dataset_repo_id`: LeRobot dataset repository ID.
-
-- `--lerobot_dataset_fps`: LeRobot dtaset frames per second.
 
 </details>
 

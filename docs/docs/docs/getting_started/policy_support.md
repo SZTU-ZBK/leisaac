@@ -30,7 +30,7 @@ python scripts/convert/isaaclab2lerobot.py \
 
 - `--repo_id`: Specify the LeRobot Dataset repo-id, e.g., `EverNorif/so101_test_orange_pick`
 
-- `--fps`: Specify the fps of LeRobot Dataset.
+- `--recording_hz`: Expected dataset frequency. By default it is read from HDF5 metadata and used as the LeRobot FPS.
 
 - `--hdf5_root`: HDF5 root directory.
 

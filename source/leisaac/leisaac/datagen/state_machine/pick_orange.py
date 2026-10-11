@@ -16,7 +16,7 @@ from .base import StateMachineBase
 _GRIPPER_OPEN = 1.0
 _GRIPPER_CLOSE = -1.0
 _GRIPPER_OFFSET = 0.1  # vertical clearance for the gripper tip
-_APPROACH_STEPS: int = 120  # steps to smoothly interpolate from init EE pos to hover (first orange only)
+_REFERENCE_ACTION_HZ = 60
 
 _REST_POSE_DEG = {
     "shoulder_pan": 0.0,
@@ -53,10 +53,27 @@ class PickOrangeStateMachine(StateMachineBase):
         num_oranges: Total number of oranges to pick and place. Defaults to 3.
     """
 
-    MAX_STEPS_PER_ORANGE: int = 980
-
-    def __init__(self, num_oranges: int = 3) -> None:
+    def __init__(self, num_oranges: int = 3, action_hz: int = _REFERENCE_ACTION_HZ) -> None:
+        if action_hz <= 0:
+            raise ValueError("action_hz must be positive")
         self._num_oranges = num_oranges
+        self._action_hz = action_hz
+
+        def scale_reference_step(reference_step: int) -> int:
+            return max(1, round(reference_step * action_hz / _REFERENCE_ACTION_HZ))
+
+        self._approach_end = scale_reference_step(120)
+        self._move_above_orange_end = scale_reference_step(180)
+        self._hover_above_orange_end = scale_reference_step(300)
+        self._lower_to_orange_end = scale_reference_step(360)
+        self._grasp_end = scale_reference_step(420)
+        self._lift_orange_end = scale_reference_step(500)
+        self._move_above_plate_end = scale_reference_step(550)
+        self._lower_to_plate_end = scale_reference_step(600)
+        self._release_end = scale_reference_step(640)
+        self._lift_gripper_end = scale_reference_step(680)
+        self._max_steps_per_orange = scale_reference_step(980)
+
         self._step_count: int = 0
         self._orange_now: int = 1
         self._episode_done: bool = False
@@ -118,16 +135,21 @@ class PickOrangeStateMachine(StateMachineBase):
     def pre_step(self, env) -> None:
         """Blend joint state toward rest pose during the final orange's home phase.
 
-        Only active when ``orange_now == num_oranges`` and ``step_count >= 680``.
+        Only active during the final orange's return-home phase.
         Writes blended joint positions directly to the sim so the arm smoothly
         returns home while IK still receives the rest-pose EE target.
         """
-        if self._orange_now == self._num_oranges and self._step_count >= 680 and self._rest_joint_pos is not None:
+        if (
+            self._orange_now == self._num_oranges
+            and self._step_count >= self._lift_gripper_end
+            and self._rest_joint_pos is not None
+        ):
             robot = env.scene["robot"]
-            if self._step_count == 680:
+            if self._step_count == self._lift_gripper_end:
                 self._home_start_pos = robot.data.joint_pos.clone()
             if self._home_start_pos is not None:
-                alpha = min((self._step_count - 680) / 299.0, 1.0)
+                home_steps = self._max_steps_per_orange - self._lift_gripper_end
+                alpha = min((self._step_count - self._lift_gripper_end) / max(home_steps - 1, 1), 1.0)
                 blended = self._home_start_pos + (self._rest_joint_pos - self._home_start_pos) * alpha
                 robot.write_joint_state_to_sim(position=blended, velocity=torch.zeros_like(blended))
 
@@ -155,25 +177,25 @@ class PickOrangeStateMachine(StateMachineBase):
         if self._orange_now == 1 and step == 0:
             self._initial_ee_pos = robot.data.body_pos_w[:, -1, :].clone()
 
-        if self._orange_now == 1 and step < _APPROACH_STEPS:
+        if self._orange_now == 1 and step < self._approach_end:
             target_pos_w, gripper_cmd = self._phase_approach_hover(orange_pos_w, num_envs, device)
-        elif step < 180:
+        elif step < self._move_above_orange_end:
             target_pos_w, gripper_cmd = self._phase_move_above_orange(orange_pos_w, num_envs, device)
-        elif step < 300:
+        elif step < self._hover_above_orange_end:
             target_pos_w, gripper_cmd = self._phase_hover_above_orange(orange_pos_w, num_envs, device)
-        elif step < 360:
+        elif step < self._lower_to_orange_end:
             target_pos_w, gripper_cmd = self._phase_lower_to_orange(orange_pos_w, num_envs, device)
-        elif step < 420:
+        elif step < self._grasp_end:
             target_pos_w, gripper_cmd = self._phase_grasp(orange_pos_w, num_envs, device)
-        elif step < 500:
+        elif step < self._lift_orange_end:
             target_pos_w, gripper_cmd = self._phase_lift_orange(orange_pos_w, num_envs, device)
-        elif step < 550:
+        elif step < self._move_above_plate_end:
             target_pos_w, gripper_cmd = self._phase_move_above_plate(plate_pos_w, num_envs, device)
-        elif step < 600:
+        elif step < self._lower_to_plate_end:
             target_pos_w, gripper_cmd = self._phase_lower_to_plate(plate_pos_w, num_envs, device)
-        elif step < 640:
+        elif step < self._release_end:
             target_pos_w, gripper_cmd = self._phase_release(plate_pos_w, num_envs, device)
-        elif step < 680:
+        elif step < self._lift_gripper_end:
             target_pos_w, gripper_cmd = self._phase_lift_gripper(plate_pos_w, num_envs, device)
         else:
             target_pos_w, gripper_cmd = self._phase_return_home(num_envs, device)
@@ -185,22 +207,22 @@ class PickOrangeStateMachine(StateMachineBase):
     def advance(self) -> None:
         """Advance step counter, handle orange transitions, and fast-forward home phase.
 
-        For non-final oranges, the return-home phase (steps 680–979) is skipped
+        For non-final oranges, the return-home phase is skipped
         without simulation — the arm goes straight to the next orange.
         """
         self._step_count += 1
-        if self._step_count >= self.MAX_STEPS_PER_ORANGE:
+        if self._step_count >= self._max_steps_per_orange:
             if self._orange_now >= self._num_oranges:
                 self._episode_done = True
             else:
                 self._orange_now += 1
                 self._step_count = 0
-        elif self._orange_now < self._num_oranges and self._step_count >= 680:
+        elif self._orange_now < self._num_oranges and self._step_count >= self._lift_gripper_end:
             # Fast-forward: skip the home phase for intermediate oranges.
             prev_orange = self._orange_now
             while self._orange_now == prev_orange and not self._episode_done:
                 self._step_count += 1
-                if self._step_count >= self.MAX_STEPS_PER_ORANGE:
+                if self._step_count >= self._max_steps_per_orange:
                     self._orange_now += 1
                     self._step_count = 0
 
@@ -221,7 +243,7 @@ class PickOrangeStateMachine(StateMachineBase):
         hover_target[:, 0] -= 0.03
         hover_target[:, 1] -= 0.01
         hover_target[:, 2] += 0.1 + _GRIPPER_OFFSET
-        alpha = self._step_count / _APPROACH_STEPS
+        alpha = self._step_count / self._approach_end
         if self._initial_ee_pos is not None:
             target_pos_w = (1.0 - alpha) * self._initial_ee_pos + alpha * hover_target
         else:

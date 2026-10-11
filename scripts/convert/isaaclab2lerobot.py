@@ -34,10 +34,10 @@ parser.add_argument(
     help="Repository ID",
 )
 parser.add_argument(
-    "--fps",
+    "--recording_hz",
     type=int,
-    default=30,
-    help="Frames per second",
+    default=None,
+    help="Expected dataset frequency. Inferred from HDF5 metadata when omitted.",
 )
 parser.add_argument(
     "--hdf5_root",
@@ -81,6 +81,8 @@ simulation_app = app_launcher.app
 
 
 import gymnasium as gym
+import h5py
+import json
 import torch
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
@@ -132,6 +134,33 @@ def add_episode(
     return True
 
 
+def get_recording_hz(hdf5_files: list[str], requested_hz: int | None) -> int:
+    """Resolve one recording frequency across all input HDF5 files."""
+    frequencies = set()
+    for file_path in hdf5_files:
+        with h5py.File(file_path, "r") as hdf5_file:
+            env_args = json.loads(hdf5_file["data"].attrs.get("env_args", "{}"))
+            frequency = env_args.get("frequency", {}).get("recording_hz")
+            if frequency is not None:
+                frequencies.add(int(frequency))
+
+    if len(frequencies) > 1:
+        raise ValueError(f"Input HDF5 files have different recording frequencies: {sorted(frequencies)}")
+    metadata_hz = next(iter(frequencies), None)
+    if requested_hz is not None:
+        if requested_hz <= 0:
+            raise ValueError("--recording_hz must be positive")
+        if metadata_hz is not None and requested_hz != metadata_hz:
+            raise ValueError(
+                f"--recording_hz ({requested_hz}) does not match HDF5 metadata ({metadata_hz})"
+            )
+        return requested_hz
+    if metadata_hz is not None:
+        return metadata_hz
+    print("[WARN] HDF5 has no recording_hz metadata; assuming legacy 60 Hz recording.")
+    return 60
+
+
 def convert_isaaclab_to_lerobot():
     """automatically build features and dataset"""
     env_cfg = parse_env_cfg(args_cli.task_name, device=args_cli.device, num_envs=1)
@@ -140,9 +169,18 @@ def convert_isaaclab_to_lerobot():
 
     env: ManagerBasedRLEnv | DirectRLEnv = gym.make(args_cli.task_name, cfg=env_cfg).unwrapped
 
+    if args_cli.hdf5_files is None:
+        hdf5_files_list = [os.path.join(args_cli.hdf5_root, "dataset.hdf5")]
+    else:
+        hdf5_files_list = [
+            os.path.join(args_cli.hdf5_root, f.strip()) if not os.path.isabs(f.strip()) else f.strip()
+            for f in args_cli.hdf5_files.split(",")
+        ]
+
+    recording_hz = get_recording_hz(hdf5_files_list, args_cli.recording_hz)
     dataset_cfg = LeRobotDatasetCfg(
         repo_id=args_cli.repo_id,
-        fps=args_cli.fps,
+        fps=recording_hz,
         robot_type=env_cfg.robot_name,
     )
     dataset_cfg.features = build_feature_from_env(env, dataset_cfg)
@@ -154,14 +192,6 @@ def convert_isaaclab_to_lerobot():
         features=dataset_cfg.features,
     )
 
-    if args_cli.hdf5_files is None:
-        hdf5_files_list = [os.path.join(args_cli.hdf5_root, "dataset.hdf5")]
-    else:
-        hdf5_files_list = [
-            os.path.join(args_cli.hdf5_root, f.strip()) if not os.path.isabs(f.strip()) else f.strip()
-            for f in args_cli.hdf5_files.split(",")
-        ]
-
     now_episode_index = 0
     for hdf5_id, hdf5_file in enumerate(hdf5_files_list):
         print(f"[{hdf5_id+1}/{len(hdf5_files_list)}] Processing hdf5 file: {hdf5_file}")
@@ -172,10 +202,10 @@ def convert_isaaclab_to_lerobot():
         episode_names = dataset_file_handler.get_episode_names()
         print(f"Found {len(episode_names)} episodes: {episode_names}")
         for episode_name in tqdm(episode_names, desc="Processing each episode"):
-            episode = dataset_file_handler.load_episode(episode_name, device=args_cli.device)
-            if not episode.success:
+            if not bool(dataset_file_handler._hdf5_data_group[episode_name].attrs.get("success", False)):
                 print(f"Episode {episode_name} is not successful, skip it")
                 continue
+            episode = dataset_file_handler.load_episode(episode_name, device="cpu")
             valid = add_episode(dataset, episode, env, dataset_cfg, args_cli.task_description)
             if valid:
                 now_episode_index += 1

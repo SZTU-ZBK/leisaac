@@ -14,7 +14,7 @@ LeRobot Recorder replaces the default recorder manager with `LeRobotRecorderMana
    - **Success**: Calls `flush()` to save the entire episode to the dataset
    - **Failure**: Calls `clear()` to clear the buffer without saving data
 
-LeIsaac automatically skips the first 5 frames of each episode to avoid instability from initial states affecting data quality.
+The recorder uses the same configurable recording cadence as the HDF5 recorder. The configured recording frequency is also written as the LeRobot dataset FPS.
 
 ## Usage
 
@@ -33,16 +33,20 @@ python scripts/environments/teleoperation/teleop_se3_agent.py \
     --record \
     --use_lerobot_recorder \
     --lerobot_dataset_repo_id=EverNorif/test_lerobot_recorder \
-    --lerobot_dataset_fps=30
+    --sim_hz=60 \
+    --action_hz=60 \
+    --recording_hz=30
 ```
 
-Simply enable `--use_lerobot_recorder` and specify the `repo_id` and `dataset_fps` to record data directly in LeRobot Dataset format during teleoperation.
+Simply enable `--use_lerobot_recorder` and specify the `repo_id` to record data directly in LeRobot Dataset format.
 
 ## Parameters
 
 - `--use_lerobot_recorder`: Enables the LeRobot format recorder
 - `--lerobot_dataset_repo_id`: HuggingFace dataset repository ID (format: `username/repository_name`)
-- `--lerobot_dataset_fps`: Dataset frame rate, typically set to 30 FPS
+- `--sim_hz`: Physics simulation frequency (default: 60 Hz)
+- `--action_hz`: Action output frequency (default: 60 Hz)
+- `--recording_hz`: Actual dataset sampling frequency and LeRobot FPS (default: 30 Hz)
 
 ::::tip
 Compared to recording as hdf5, LeRobot Recorder integration may cause slight delays in teleoperation. If you encounter this issue, consider not using `--use_lerobot_recorder`.

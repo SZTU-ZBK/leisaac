@@ -21,6 +21,7 @@ from isaaclab.envs import ManagerBasedEnv
 from isaaclab.managers import DatasetExportMode, RecorderManager
 
 from ..datasets import StreamingHDF5DatasetFileHandler, StreamWriteMode
+from .recording_cadence import RecordingCadence
 
 
 class EnhanceDatasetExportMode(enum.IntEnum):
@@ -33,7 +34,7 @@ class EnhanceDatasetExportMode(enum.IntEnum):
 
 
 class StreamingRecorderManager(RecorderManager):
-    def __init__(self, cfg: object, env: ManagerBasedEnv) -> None:
+    def __init__(self, cfg: object, env: ManagerBasedEnv, action_hz: int, recording_hz: int) -> None:
         # use streaming_hdf5_dataset_file_handler
         cfg.dataset_file_handler_class_type = StreamingHDF5DatasetFileHandler
 
@@ -51,11 +52,25 @@ class StreamingRecorderManager(RecorderManager):
             )
 
         self._env_steps_record = torch.zeros(self._env.num_envs)
+        self._cadence = RecordingCadence(action_hz, recording_hz)
+        self._record_this_step = False
         self._flush_steps = 100
         self._compression = None
         if self._dataset_file_handler is not None:
             self._dataset_file_handler.chunks_length = self._flush_steps
             self._dataset_file_handler.compression = self._compression
+            frequency_metadata = {
+                "simulation_hz": round(1.0 / env.physics_dt),
+                "action_hz": action_hz,
+                "recording_hz": recording_hz,
+            }
+            existing_frequency = self._dataset_file_handler._env_args.get("frequency")
+            if existing_frequency is not None and existing_frequency != frequency_metadata:
+                raise ValueError(
+                    "Cannot resume HDF5 recording with different frequencies: "
+                    f"existing={existing_frequency}, requested={frequency_metadata}"
+                )
+            self._dataset_file_handler.add_env_args({"frequency": frequency_metadata})
 
     @property
     def flush_steps(self) -> int:
@@ -83,9 +98,25 @@ class StreamingRecorderManager(RecorderManager):
         return msg
 
     def record_pre_step(self) -> None:
+        self._record_this_step = self._cadence.begin_step()
+        if not self._record_this_step:
+            return
         self._env_steps_record += 1
         super().record_pre_step()
-        self.export_episodes(from_step=True)
+
+    def record_post_step(self) -> None:
+        if self._record_this_step:
+            super().record_post_step()
+            self.export_episodes(from_step=True)
+
+    def record_post_physics_decimation_step(self) -> None:
+        if self._record_this_step:
+            super().record_post_physics_decimation_step()
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
+        self._cadence.reset()
+        self._record_this_step = False
+        return super().reset(env_ids)
 
     def export_episodes(self, env_ids: Sequence[int] | None = None, from_step: bool = False) -> None:
         if len(self.active_terms) == 0:

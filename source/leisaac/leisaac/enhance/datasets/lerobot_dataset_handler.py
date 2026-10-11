@@ -8,8 +8,10 @@ try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     _HAS_LEROBOT = True
-except ImportError:
+    _LEROBOT_IMPORT_ERROR = None
+except ImportError as exc:
     _HAS_LEROBOT = False
+    _LEROBOT_IMPORT_ERROR = exc
     LeRobotDataset = None  # Placeholder
 
 
@@ -37,21 +39,21 @@ class LeRobotDatasetHandler(DatasetFileHandlerBase):
         self._env_args = {}
 
     def create(self, file_path: str, env_name: str = None, resume: bool = False):
-        if _HAS_LEROBOT:
-            # Original LeRobot logic
-            if resume:
-                self._lerobot_dataset = LeRobotDataset(repo_id=self._cfg.repo_id)
-            else:
-                self._lerobot_dataset = LeRobotDataset.create(
-                    repo_id=self._cfg.repo_id,
-                    fps=self._cfg.fps,
-                    robot_type=self._cfg.robot_type,
-                    features=self._cfg.features,
-                )
+        if not _HAS_LEROBOT:
+            raise ImportError(
+                "LeRobot recording dependencies could not be imported. "
+                'Install compatible versions with: pip install -e "source/leisaac[lerobot]". '
+                f"Underlying import error: {_LEROBOT_IMPORT_ERROR}"
+            ) from _LEROBOT_IMPORT_ERROR
+        if resume:
+            self._lerobot_dataset = LeRobotDataset(repo_id=self._cfg.repo_id)
         else:
-            # Decoupled logic: Use a simple dictionary logger
-            print("LeRobot not found. Using GenericDataRecorder.")
-            self._lerobot_dataset = GenericDataRecorder(self._cfg.repo_id, self._cfg.fps, self._cfg.features)
+            self._lerobot_dataset = LeRobotDataset.create(
+                repo_id=self._cfg.repo_id,
+                fps=self._cfg.fps,
+                robot_type=self._cfg.robot_type,
+                features=self._cfg.features,
+            )
 
     def open(self, file_path: str, mode: str = "r"):
         """Opens an existing dataset for reading or appending."""

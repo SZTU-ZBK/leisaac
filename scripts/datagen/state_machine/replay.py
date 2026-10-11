@@ -12,7 +12,8 @@ from isaaclab.app import AppLauncher
 parser = argparse.ArgumentParser(description="Replay state-machine recorded demonstrations.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
-parser.add_argument("--step_hz", type=int, default=60, help="Environment stepping rate in Hz.")
+parser.add_argument("--sim_hz", type=int, default=None, help="Physics frequency; defaults to dataset metadata.")
+parser.add_argument("--action_hz", type=int, default=None, help="Replay action frequency; defaults to recording_hz.")
 parser.add_argument(
     "--dataset_file", type=str, default="./datasets/dataset.hdf5", help="File path to load recorded demos."
 )
@@ -43,10 +44,18 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+if args_cli.sim_hz is not None and args_cli.sim_hz <= 0:
+    parser.error("--sim_hz must be positive")
+if args_cli.action_hz is not None and args_cli.action_hz <= 0:
+    parser.error("--action_hz must be positive")
+if args_cli.sim_hz is not None and args_cli.action_hz is not None and args_cli.sim_hz % args_cli.action_hz != 0:
+    parser.error("--sim_hz must be divisible by --action_hz")
+
 app_launcher = AppLauncher(vars(args_cli))
 simulation_app = app_launcher.app
 
 import contextlib
+import json
 import os
 import time
 
@@ -55,6 +64,7 @@ import h5py
 import numpy as np
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
+from isaaclab.sensors import CameraCfg
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 from isaaclab_tasks.utils import parse_env_cfg
 from leisaac.utils.env_utils import get_task_type
@@ -158,6 +168,15 @@ def main():
     dataset_file_handler.open(args_cli.dataset_file)
     episode_count = dataset_file_handler.get_num_episodes()
 
+    env_args = json.loads(dataset_file_handler._hdf5_data_group.attrs.get("env_args", "{}"))
+    frequency_metadata = env_args.get("frequency", {})
+    sim_hz = args_cli.sim_hz or frequency_metadata.get("simulation_hz", 60)
+    action_hz = args_cli.action_hz or frequency_metadata.get(
+        "recording_hz", frequency_metadata.get("action_hz", 60)
+    )
+    if sim_hz < action_hz or sim_hz % action_hz != 0:
+        raise ValueError(f"sim_hz ({sim_hz}) must be >= and divisible by action_hz ({action_hz})")
+
     if episode_count == 0:
         print("No episodes found in the dataset.")
         return
@@ -169,6 +188,12 @@ def main():
 
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=num_envs)
     env_cfg.use_teleop_device(task_type)
+    env_cfg.sim.dt = 1.0 / sim_hz
+    env_cfg.decimation = sim_hz // action_hz
+    env_cfg.sim.render_interval = sim_hz // action_hz
+    for value in vars(env_cfg.scene).values():
+        if isinstance(value, CameraCfg):
+            value.update_period = 1.0 / action_hz
     env_cfg.recorders = {}
     env_cfg.terminations = {}
 
@@ -189,7 +214,8 @@ def main():
         env.initialize()
     env.reset()
 
-    rate_limiter = RateLimiter(args_cli.step_hz)
+    print(f"[Replay Frequency] simulation={sim_hz} Hz, action={action_hz} Hz")
+    rate_limiter = RateLimiter(action_hz)
     episode_names = list(dataset_file_handler.get_episode_names())
     replayed_episode_count = 0
 

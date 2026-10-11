@@ -10,6 +10,7 @@ Usage:
 """
 
 import multiprocessing
+import importlib.util
 
 if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
@@ -26,7 +27,9 @@ parser.add_argument("--num_envs", type=int, default=1, help="Number of environme
 parser.add_argument("--task", type=str, required=True, help="Name of the task.")
 parser.add_argument("--seed", type=int, default=None, help="Seed for the environment.")
 parser.add_argument("--record", action="store_true", help="Whether to enable record function.")
-parser.add_argument("--step_hz", type=int, default=60, help="Environment stepping rate in Hz.")
+parser.add_argument("--sim_hz", type=int, default=60, help="Physics simulation frequency in Hz.")
+parser.add_argument("--action_hz", type=int, default=60, help="State-machine action output frequency in Hz.")
+parser.add_argument("--recording_hz", type=int, default=30, help="HDF5/LeRobot recording frequency in Hz.")
 parser.add_argument(
     "--dataset_file", type=str, default="./datasets/dataset.hdf5", help="File path to export recorded demos."
 )
@@ -37,10 +40,27 @@ parser.add_argument(
 parser.add_argument("--quality", action="store_true", help="Whether to enable quality render mode.")
 parser.add_argument("--use_lerobot_recorder", action="store_true", help="Whether to use lerobot recorder.")
 parser.add_argument("--lerobot_dataset_repo_id", type=str, default=None, help="Lerobot Dataset repository ID.")
-parser.add_argument("--lerobot_dataset_fps", type=int, default=30, help="Lerobot Dataset frames per second.")
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if args_cli.sim_hz <= 0 or args_cli.action_hz <= 0 or args_cli.recording_hz <= 0:
+    parser.error("--sim_hz, --action_hz, and --recording_hz must all be positive")
+if not args_cli.sim_hz >= args_cli.action_hz >= args_cli.recording_hz:
+    parser.error("frequencies must satisfy sim_hz >= action_hz >= recording_hz")
+if args_cli.sim_hz % args_cli.action_hz != 0:
+    parser.error("--sim_hz must be divisible by --action_hz")
+if args_cli.action_hz % args_cli.recording_hz != 0:
+    parser.error("--action_hz must be divisible by --recording_hz")
+if args_cli.sim_hz % args_cli.recording_hz != 0:
+    parser.error("--sim_hz must be divisible by --recording_hz")
+if args_cli.use_lerobot_recorder and args_cli.num_envs != 1:
+    parser.error("direct LeRobot recording currently requires --num_envs 1")
+if args_cli.use_lerobot_recorder and importlib.util.find_spec("lerobot") is None:
+    parser.error(
+        "--use_lerobot_recorder requires LeRobot. Install it with: "
+        'pip install -e "source/leisaac[lerobot]"'
+    )
 
 app_launcher_args = vars(args_cli)
 app_launcher = AppLauncher(app_launcher_args)
@@ -51,6 +71,7 @@ import leisaac.tasks  # noqa: F401
 import torch
 from isaaclab.envs import DirectRLEnv, ManagerBasedRLEnv
 from isaaclab.managers import DatasetExportMode, TerminationTermCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab_tasks.utils import parse_env_cfg
 from leisaac.datagen.state_machine import PickOrangeStateMachine
 from leisaac.enhance.managers import EnhanceDatasetExportMode, StreamingRecorderManager
@@ -156,13 +177,35 @@ def _replace_recorder_manager(env, env_cfg, args_cli):
 
         dataset_cfg = LeRobotDatasetCfg(
             repo_id=args_cli.lerobot_dataset_repo_id,
-            fps=args_cli.lerobot_dataset_fps,
+            fps=args_cli.recording_hz,
         )
-        env.recorder_manager = LeRobotRecorderManager(env_cfg.recorders, dataset_cfg, env)
+        env.recorder_manager = LeRobotRecorderManager(
+            env_cfg.recorders,
+            dataset_cfg,
+            env,
+            action_hz=args_cli.action_hz,
+            recording_hz=args_cli.recording_hz,
+        )
     else:
-        env.recorder_manager = StreamingRecorderManager(env_cfg.recorders, env)
+        env.recorder_manager = StreamingRecorderManager(
+            env_cfg.recorders,
+            env,
+            action_hz=args_cli.action_hz,
+            recording_hz=args_cli.recording_hz,
+        )
         env.recorder_manager.flush_steps = 100
         env.recorder_manager.compression = "lzf"
+
+
+def _configure_frequencies(env_cfg, args_cli):
+    """Apply physics, action, rendering, and camera frequencies to an environment config."""
+    env_cfg.sim.dt = 1.0 / args_cli.sim_hz
+    env_cfg.decimation = args_cli.sim_hz // args_cli.action_hz
+    env_cfg.sim.render_interval = args_cli.sim_hz // args_cli.recording_hz
+
+    for value in vars(env_cfg.scene).values():
+        if isinstance(value, CameraCfg):
+            value.update_period = 1.0 / args_cli.recording_hz
 
 
 def _on_episode_done(env, sm, args_cli, resume_recorded_demo_count, current_recorded_demo_count, start_record_state):
@@ -231,7 +274,15 @@ def main():
 
     env_cfg = parse_env_cfg(task_name, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.use_teleop_device(device)
+    _configure_frequencies(env_cfg, args_cli)
     env_cfg.seed = args_cli.seed if args_cli.seed is not None else int(time.time())
+
+    print("[Frequency Configuration]")
+    print(f"  Physics simulation : {args_cli.sim_hz} Hz")
+    print(f"  Action output      : {args_cli.action_hz} Hz")
+    print(f"  Dataset recording  : {args_cli.recording_hz} Hz")
+    print(f"  Physics/action     : {args_cli.sim_hz // args_cli.action_hz} step(s)")
+    print(f"  Action/recording   : {args_cli.action_hz // args_cli.recording_hz} step(s)")
 
     is_direct_env = "Direct" in task_name
     _configure_env_cfg(env_cfg, args_cli, is_direct_env, output_dir, output_file_name)
@@ -250,13 +301,13 @@ def main():
     if args_cli.record:
         _replace_recorder_manager(env, env_cfg, args_cli)
 
-    rate_limiter = RateLimiter(args_cli.step_hz)
+    rate_limiter = RateLimiter(args_cli.action_hz)
 
     if hasattr(env, "initialize"):
         env.initialize()
 
     # one-time state machine setup (e.g. FK calibration)
-    sm = SMClass()
+    sm = SMClass(action_hz=args_cli.action_hz)
     sm.setup(env)
     env.reset()
     sm.reset()

@@ -8,10 +8,18 @@ from leisaac.utils.robot_utils import build_feature_from_env
 
 from ..datasets.lerobot_dataset_handler import LeRobotDatasetCfg, LeRobotDatasetHandler
 from .recorder_manager import EnhanceDatasetExportMode
+from .recording_cadence import RecordingCadence
 
 
 class LeRobotRecorderManager(RecorderManager):
-    def __init__(self, cfg: object, dataset_cfg: LeRobotDatasetCfg, env: ManagerBasedEnv) -> None:
+    def __init__(
+        self,
+        cfg: object,
+        dataset_cfg: LeRobotDatasetCfg,
+        env: ManagerBasedEnv,
+        action_hz: int,
+        recording_hz: int,
+    ) -> None:
         real_export_mode = cfg.dataset_export_mode
         cfg.dataset_export_mode = DatasetExportMode.EXPORT_NONE
         super().__init__(cfg, env)
@@ -34,8 +42,8 @@ class LeRobotRecorderManager(RecorderManager):
         self._dataset_file_handler = cfg.dataset_file_handler_class_type(dataset_cfg)
         self._dataset_file_handler.create(None, resume=resume)
 
-        self._skip_frames = 5
-        self._env_steps_record = torch.zeros(self._env.num_envs)
+        self._cadence = RecordingCadence(action_hz, recording_hz)
+        self._record_this_step = False
 
     def __str__(self) -> str:
         msg = "[Enhanced] LeRobotRecorderManager. \n"
@@ -46,19 +54,25 @@ class LeRobotRecorderManager(RecorderManager):
         self._dataset_file_handler.finalize()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
-        if env_ids is None:
-            env_ids = list(range(self._env.num_envs))
-        self._env_steps_record[env_ids] = 0
+        self._cadence.reset()
+        self._record_this_step = False
         return super().reset(env_ids)
+
+    def record_pre_step(self) -> None:
+        self._record_this_step = self._cadence.begin_step()
+        if self._record_this_step:
+            super().record_pre_step()
+
+    def record_post_physics_decimation_step(self) -> None:
+        if self._record_this_step:
+            super().record_post_physics_decimation_step()
 
     def record_post_step(self) -> None:
         """add frame to lerobot dataset after record_post_step"""
-        super().record_post_step()
-
-        env_idx = 0
-        self._env_steps_record[env_idx] += 1
-        if self._env_steps_record[env_idx] <= self._skip_frames:
+        if not self._record_this_step:
             return
+        super().record_post_step()
+        env_idx = 0
         frame = self._env.cfg.build_lerobot_frame(self._episodes[env_idx], self._dataset_cfg)
         self._dataset_file_handler.add_frame(frame)
         self._episodes[env_idx]._data.clear()

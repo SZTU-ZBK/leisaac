@@ -12,6 +12,9 @@ python scripts/datagen/state_machine/generate.py \
     --enable_cameras \
     --record \
     --dataset_file ./datasets/pick_orange.hdf5 \
+    --sim_hz 60 \
+    --action_hz 60 \
+    --recording_hz 30 \
     --num_demos 50
 ```
 
@@ -36,15 +39,17 @@ python scripts/datagen/state_machine/generate.py \
 
 - `--num_demos`: Number of successful demonstrations to record. Set to `0` for infinite.
 
-- `--step_hz`: Environment stepping rate in Hz (default: `60`).
+- `--sim_hz`: Physics simulation frequency in Hz (default: `60`).
+
+- `--action_hz`: State-machine action output frequency in Hz (default: `60`).
+
+- `--recording_hz`: HDF5/LeRobot recording frequency and LeRobot FPS (default: `30`). Frequencies must be integer divisors.
 
 - `--quality`: Enable quality render mode.
 
 - `--use_lerobot_recorder`: Record directly in LeRobot Dataset format instead of HDF5.
 
 - `--lerobot_dataset_repo_id`: HuggingFace dataset repository ID (format: `username/repository_name`). Required when `--use_lerobot_recorder` is set.
-
-- `--lerobot_dataset_fps`: Dataset frame rate when using LeRobot recorder (default: `30`).
 
 </details>
 
@@ -86,7 +91,9 @@ python scripts/datagen/state_machine/replay.py \
 
 - `--select_episodes`: List of episode indices to replay. Leave empty to replay all episodes.
 
-- `--step_hz`: Environment stepping rate in Hz (default: `60`).
+- `--sim_hz`: Physics frequency. Defaults to the value stored in dataset metadata.
+
+- `--action_hz`: Replay action frequency. Defaults to the dataset recording frequency.
 
 </details>
 
