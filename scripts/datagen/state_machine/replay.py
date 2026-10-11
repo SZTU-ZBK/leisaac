@@ -51,6 +51,8 @@ import os
 import time
 
 import gymnasium as gym
+import h5py
+import numpy as np
 import torch
 from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
@@ -58,6 +60,52 @@ from isaaclab_tasks.utils import parse_env_cfg
 from leisaac.utils.env_utils import get_task_type
 
 import leisaac  # noqa: F401
+
+
+def load_replay_episode(
+    dataset_file_handler: HDF5DatasetFileHandler, episode_name: str, replay_mode: str
+) -> EpisodeData:
+    """Load only the fields required for replay, keeping them in CPU memory.
+
+    ``HDF5DatasetFileHandler.load_episode`` eagerly copies every field to the
+    requested device. Recorded observations can contain several GiB of camera
+    images, which is unnecessary for replay and easily exhausts GPU memory.
+    """
+    episode_group = dataset_file_handler._hdf5_data_group[episode_name]
+    required_fields = ("initial_state", "actions" if replay_mode == "action" else "states")
+
+    def load_group(group):
+        data = {}
+        for key, value in group.items():
+            if isinstance(value, h5py.Group):
+                data[key] = load_group(value)
+            else:
+                data[key] = torch.from_numpy(np.asarray(value))
+        return data
+
+    missing_fields = [field for field in required_fields if field not in episode_group]
+    if missing_fields:
+        raise KeyError(f"Episode '{episode_name}' is missing replay fields: {missing_fields}")
+
+    episode = EpisodeData()
+    episode.data = {
+        field: load_group(episode_group[field])
+        if isinstance(episode_group[field], h5py.Group)
+        else torch.from_numpy(np.asarray(episode_group[field]))
+        for field in required_fields
+    }
+    episode.seed = episode_group.attrs.get("seed")
+    episode.success = episode_group.attrs.get("success")
+    return episode
+
+
+def move_tensors_to_device(data, device):
+    """Recursively move a nested tensor dictionary to a device."""
+    if isinstance(data, dict):
+        return {key: move_tensors_to_device(value, device) for key, value in data.items()}
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    return data
 
 
 class RateLimiter:
@@ -135,7 +183,7 @@ def main():
         if "Robot" in str(_prim.GetPath()) and _prim.HasAPI(UsdPhysics.RigidBodyAPI):
             PhysxSchema.PhysxRigidBodyAPI.Apply(_prim).CreateDisableGravityAttr(True)
 
-    idle_action = torch.zeros(env.action_space.shape)
+    idle_action = torch.zeros(env.action_space.shape, device=env.device)
 
     if hasattr(env, "initialize"):
         env.initialize()
@@ -150,7 +198,7 @@ def main():
             env_episode_data_map = {i: EpisodeData() for i in range(num_envs)}
             has_next_action = True
             while has_next_action:
-                actions = idle_action
+                actions = idle_action.clone()
                 has_next_action = False
                 for env_id in range(num_envs):
                     env_next_action = get_next_action(
@@ -169,11 +217,13 @@ def main():
                         if next_episode_index is not None:
                             replayed_episode_count += 1
                             print(f"{replayed_episode_count:4}: Loading #{next_episode_index} episode to env_{env_id}")
-                            episode_data = dataset_file_handler.load_episode(
-                                episode_names[next_episode_index], env.device
+                            episode_data = load_replay_episode(
+                                dataset_file_handler,
+                                episode_names[next_episode_index],
+                                args_cli.replay_mode,
                             )
                             env_episode_data_map[env_id] = episode_data
-                            initial_state = episode_data.get_initial_state()
+                            initial_state = move_tensors_to_device(episode_data.get_initial_state(), env.device)
                             env.reset_to(
                                 initial_state,
                                 torch.tensor([env_id], device=env.device),
@@ -190,7 +240,7 @@ def main():
                             continue
                     else:
                         has_next_action = True
-                    actions[env_id] = env_next_action
+                    actions[env_id] = env_next_action.to(env.device)
 
                 # Apply damping every step to match state-machine recording behavior.
                 apply_damping(env, task_type)
