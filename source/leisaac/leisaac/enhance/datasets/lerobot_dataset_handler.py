@@ -29,6 +29,8 @@ class LeRobotDatasetCfg:
     """Features for the LeRobotDataset."""
     action_align: bool = False
     """Whether the action shape equals to the joint number. If action align, we will convert action to lerobot limit range."""
+    image_writer_threads: int = 8
+    """Number of asynchronous threads used to write camera images."""
 
 
 class LeRobotDatasetHandler(DatasetFileHandlerBase):
@@ -47,12 +49,14 @@ class LeRobotDatasetHandler(DatasetFileHandlerBase):
             ) from _LEROBOT_IMPORT_ERROR
         if resume:
             self._lerobot_dataset = LeRobotDataset(repo_id=self._cfg.repo_id)
+            self._lerobot_dataset.start_image_writer(num_threads=self._cfg.image_writer_threads)
         else:
             self._lerobot_dataset = LeRobotDataset.create(
                 repo_id=self._cfg.repo_id,
                 fps=self._cfg.fps,
                 robot_type=self._cfg.robot_type,
                 features=self._cfg.features,
+                image_writer_threads=self._cfg.image_writer_threads,
             )
 
     def open(self, file_path: str, mode: str = "r"):
